@@ -1,0 +1,101 @@
+pipeline {
+    agent any
+    environment{
+        VERSION_CONFIG_FILE = readYaml file: 'C:\\CICD_Config\\Production_Config.yml'
+        MAJOR_VERSION = "${env.VERSION_CONFIG_FILE.get("Production").getAt("Major")}"
+        MINOR_VERSION = "${env.VERSION_CONFIG_FILE.get("Production").getAt("Minor")}"
+        PATCH_NUMBER = "${env.VERSION_CONFIG_FILE.get("Production").getAt("PatchNumber")}"
+        SPRINT_NUMBER = "${env.VERSION_CONFIG_FILE.get("Production").getAt("SprintNumber")}"
+        BUILD_VERSION = "${env.MAJOR_VERSION}.${env.MINOR_VERSION}.${env.PATCH_NUMBER}-${env.SPRINT_NUMBER}.${currentBuild.number}"
+        ARTIFACTORY_SERVER_ID = 'ARTIFACTORY_SERVER'
+        PROJECT_NAME = 'common-java'
+        PROJECT_INSTALL_DIRECTORY_NAME = 'CommonJava'
+        PROJECT_RELATIVE_DIRECTORY = "${PROJECT_NAME}"
+        SERVICE_NAME = "Cimetrix.Sapience.CommonJava"
+        REPO_NAME = "Sapience_CommonJava"
+        ARTIFACTORY_FILE = "${REPO_NAME}/com/cimetrix/sapience/${PROJECT_NAME}/${BUILD_VERSION}/${PROJECT_NAME}-${BUILD_VERSION}.jar"
+        TARGET_FILE = "${PROJECT_NAME}-${BUILD_VERSION}.jar"
+        DOWNLOAD_FILE_SCRIPT = 'DownloadFileFromArtifactory.ps1'
+        UPDATE_SERVICE_SCRIPT = 'UpdateDefaultJavaSpringBootService.ps1'
+        MAVEN_COMMAND_OPTIONS = '--batch-mode'
+    }
+    tools{
+        maven 'apache-maven-3.8.1'
+    }
+    stages {
+        stage('SCM') {
+            steps{
+                deleteDir()
+                git credentialsId: 'Bitbucket',url: 'git@bitbucket.org:cimetrix/commonjava.git', branch: 'Production'
+            }
+        }
+        stage('Build') {
+            steps {
+                dir("${env.PROJECT_RELATIVE_DIRECTORY}") {
+				    bat "mvn clean"
+                    bat "mvn --batch-mode versions:set -DnewVersion=${env.BUILD_VERSION} -DprocessPlugins=false -DprocessDependencies=false -DprocessAllModules -s C:/Users/jenkinsbot/Desktop/settings.xml"
+                    bat "mvn ${MAVEN_COMMAND_OPTIONS} compile -s C:/Users/jenkinsbot/Desktop/settings.xml"
+                }
+            }
+        }
+        stage('Test & Sonar') {
+            environment {
+                scannerHome = tool 'scanner'
+            }
+            steps {
+                withSonarQubeEnv('sonar') {
+                    dir("${env.PROJECT_RELATIVE_DIRECTORY}") {
+                        bat "mvn -Dsonar.projectKey=com.cimetrix.CommonJava-Production -Dsonar.projectName=CommonJava-Production org.jacoco:jacoco-maven-plugin:prepare-agent test org.jacoco:jacoco-maven-plugin:restore-instrumented-classes org.jacoco:jacoco-maven-plugin:report sonar:sonar"
+                    }
+                }
+            }
+        }
+        stage("Quality Gate") {
+            steps {
+              timeout(time: 15, unit: 'MINUTES') {
+                waitForQualityGate abortPipeline: true
+              }
+            }
+          }
+	    stage("Set Sonar Baseline") {
+            environment {
+                scannerHome = tool 'scanner'
+            }
+            steps {
+                withSonarQubeEnv('sonar') {
+                    dir("${env.PROJECT_RELATIVE_DIRECTORY}") {
+                        bat "mvn -Dsonar.projectKey=com.cimetrix.CommonJava-Hotfix -Dsonar.projectName=CommonJava-Hotfix -Dsonar.projectVersion=BASELINE sonar:sonar"
+                    }
+                }
+            }
+        }
+        stage('Deploy to Artifactory') {
+            steps {
+                dir("${env.PROJECT_RELATIVE_DIRECTORY}") {
+                    rtServer(
+                        id: "${env.ARTIFACTORY_SERVER_ID}",
+                        url: 'https://cmxxartifactory.jfrog.io/cmxxartifactory',
+                        username: 'jfrog.jenkins',
+                        password: 'Cimetrix@2021'
+                    )
+                    rtMavenDeployer(
+                        id: 'MAVEN_DEPLOYER',
+                        serverId: "${env.ARTIFACTORY_SERVER_ID}",
+                        releaseRepo: "${REPO_NAME}",
+                        snapshotRepo: "${REPO_NAME}"
+                    )
+
+                    rtMavenRun(
+                        goals: "${MAVEN_COMMAND_OPTIONS} -Djacoco.skip=true -DskipTests install",
+                        pom: 'pom.xml',
+                        deployerId: 'MAVEN_DEPLOYER'
+                    )
+
+                    rtPublishBuildInfo (
+                        serverId: "${env.ARTIFACTORY_SERVER_ID}"
+                    )
+                }
+            }
+        }
+	  }	
+}
