@@ -1,0 +1,97 @@
+pipeline {
+    agent any
+    environment{
+        VERSION_CONFIG_FILE = readYaml file: 'C:\\CICD_Config\\Hotfix_Config.yml'
+        MAJOR_VERSION = "${env.VERSION_CONFIG_FILE.get("Hotfix").getAt("Major")}"
+        MINOR_VERSION = "${env.VERSION_CONFIG_FILE.get("Hotfix").getAt("Minor")}"
+		PATCH_NUMBER = "${env.VERSION_CONFIG_FILE.get("Hotfix").getAt("PatchNumber")}"
+        SPRINT_NUMBER = "${env.VERSION_CONFIG_FILE.get("Hotfix").getAt("SprintNumber")}"
+        BUILD_VERSION = "${env.MAJOR_VERSION}.${env.MINOR_VERSION}.${env.PATCH_NUMBER}-${env.SPRINT_NUMBER}.${currentBuild.number}"
+        ARTIFACTORY_SERVER_ID = 'ARTIFACTORY_SERVER'
+        PROJECT_NAME = 'common-java'
+        PROJECT_INSTALL_DIRECTORY_NAME = 'CommonJava'
+        PROJECT_RELATIVE_DIRECTORY = "${PROJECT_NAME}"
+        SERVICE_NAME = "Cimetrix.Sapience.CommonJava"
+        REPO_NAME = "Sapience_CommonJava"
+        ARTIFACTORY_FILE = "${REPO_NAME}/com/cimetrix/sapience/${PROJECT_NAME}/${BUILD_VERSION}/${PROJECT_NAME}-${BUILD_VERSION}.jar"
+        TARGET_FILE = "${PROJECT_NAME}-${BUILD_VERSION}.jar"
+        DOWNLOAD_FILE_SCRIPT = 'DownloadFileFromArtifactory.ps1'
+        UPDATE_SERVICE_SCRIPT = 'UpdateDefaultJavaSpringBootService.ps1'
+        MAVEN_COMMAND_OPTIONS = '--batch-mode'
+    }
+    tools{
+        maven 'apache-maven-3.8.1'
+    }
+    stages {
+        stage('SCM') {
+            steps{
+                deleteDir()
+                git credentialsId: 'Bitbucket',url: 'git@bitbucket.org:cimetrix/commonjava.git', branch: '${HOTFIX_BRANCH_NAME}'
+            }
+        }
+        stage('Build') {
+            steps {
+                dir("${env.PROJECT_RELATIVE_DIRECTORY}") {
+				    bat "mvn clean"
+                    bat "mvn --batch-mode versions:set -DnewVersion=${env.BUILD_VERSION} -DprocessPlugins=false -DprocessDependencies=false -DprocessAllModules -s C:/Users/jenkinsbot/Desktop/settings.xml"
+                    bat "mvn ${MAVEN_COMMAND_OPTIONS} compile -s C:/Users/jenkinsbot/Desktop/settings.xml"
+                }
+            }
+        }
+        stage('Test & Sonar') {
+            environment {
+                scannerHome = tool 'scanner'
+            }
+            steps {
+                withSonarQubeEnv('sonar') {
+                    dir("${env.PROJECT_RELATIVE_DIRECTORY}") {
+                        bat "mvn -Dsonar.projectKey=com.cimetrix.CommonJava-Hotfix -Dsonar.projectName=CommonJava-Hotfix org.jacoco:jacoco-maven-plugin:prepare-agent test org.jacoco:jacoco-maven-plugin:restore-instrumented-classes org.jacoco:jacoco-maven-plugin:report sonar:sonar"
+                    }
+                }
+            }
+        }
+        stage("Quality Gate") {
+            steps {
+              timeout(time: 15, unit: 'MINUTES') {
+                waitForQualityGate abortPipeline: true
+              }
+            }
+          }
+	    stage("Set Sonar Baseline") {
+            environment {
+                scannerHome = tool 'scanner'
+            }
+            steps {
+                withSonarQubeEnv('sonar') {
+                    dir("${env.PROJECT_RELATIVE_DIRECTORY}") {
+                        bat "mvn -Dsonar.projectKey=com.cimetrix.CommonJava-Production -Dsonar.projectName=CommonJava-Production -Dsonar.projectVersion=previous_version sonar:sonar"
+                    }
+                }
+            }
+        }
+	}
+	 
+    post {
+        success {
+              bat "echo success"
+            bitbucketStatusNotify(
+                    buildState: 'SUCCESSFUL',
+                    repoSlug: 'CommonJava',
+                    commitId: env.GIT_COMMIT,
+                    buildDescription: 'YAYY !! Build is SUCCESSFUL'
+            )
+        }
+        failure {
+            bat "echo failure"
+            bitbucketStatusNotify(
+                    buildState: 'FAILED',
+                    repoSlug: 'CommonJava',
+                    commitId: env.GIT_COMMIT,
+                    buildDescription: 'Something wrong with the BUILD :('
+            )
+        }
+    }
+	  
+	
+	  
+}
